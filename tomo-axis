@@ -1,0 +1,185 @@
+#! python
+
+import pyqtgraph as pg
+import numpy as np
+import sys
+
+from tomoaxis import tifffile
+from pyqtgraph.Qt import QtCore, QtGui
+from scipy.signal import fftconvolve
+from pyqtgraph.dockarea import *
+
+
+def _set_line_edit_to_path(line_edit):
+    path = QtGui.QFileDialog.getOpenFileName()
+    line_edit.clear()
+    line_edit.setText(path)
+
+def _new_path_line_edit(text):
+    line_edit = QtGui.QLineEdit()
+    line_edit.setText(text)
+    return line_edit
+
+
+class ApplicationWindow(QtGui.QMainWindow):
+    def __init__(self, app):
+        QtGui.QMainWindow.__init__(self)
+        self.area = DockArea()
+        self.setCentralWidget(self.area)
+        self.setGeometry(200, 100, 900, 50)
+        self.setWindowTitle('Axis View')
+
+        self.slider = QtGui.QSlider(QtCore.Qt.Horizontal)
+        self.slider.setRange(0, 999)
+        self.w_axis = QtGui.QLabel()
+        self.w_over = pg.ImageView()
+        self.layout = False
+
+        self.browse_projections()
+
+    def browse_projections(self):
+        self.d_browse = Dock("browse", size = (900, 20))
+        self.d_browse.hideTitleBar()
+        self.area.addDock(self.d_browse, 'top')
+
+        label_0 = QtGui.QLabel(" 0 deg projection: ")
+        self.path_line_0 = QtGui.QLineEdit()
+        path_button_0 = QtGui.QPushButton("Browse")
+        label_180 = QtGui.QLabel(" 180 deg projection: ")
+        self.path_line_180 = QtGui.QLineEdit()
+        path_button_180 = QtGui.QPushButton("Browse")
+        self.run_button = QtGui.QPushButton("Run")
+
+        self.d_browse.addWidget(label_0, 0, 0)
+        self.d_browse.addWidget(self.path_line_0, 0, 1)
+        self.d_browse.addWidget(path_button_0, 0, 2)
+        self.d_browse.addWidget(label_180, 0, 3)
+        self.d_browse.addWidget(self.path_line_180, 0, 4)
+        self.d_browse.addWidget(path_button_180, 0, 5)
+        self.d_browse.addWidget(self.run_button, 0, 6)
+
+        path_button_0.clicked.connect(self.on_first_path_clicked)
+        path_button_180.clicked.connect(self.on_second_path_clicked)
+        self.run_button.clicked.connect(self.on_run)
+
+    def on_first_path_clicked(self):
+        _set_line_edit_to_path(self.path_line_0)
+
+    def on_second_path_clicked(self):
+        _set_line_edit_to_path(self.path_line_180)
+
+    def on_run(self):
+        try:
+            if self.layout == False:
+                self.read_data()
+                self.compute_axis()
+                self.resize(900, 900)
+                self.do_layout()
+            else:
+                self.read_data()
+                self.compute_axis()
+                self.checkbox.setEnabled(True)
+                self.checkbox.setCheckState(QtCore.Qt.Unchecked)
+
+        except Exception as e:
+            QtGui.QMessageBox.warning(self, "Warning", str(e))
+
+    def read_data(self):
+        tif_0 = tifffile.TiffFile(str(self.path_line_0.text()))
+        self.arr_0 = tif_0.asarray()
+
+        tif_180 = tifffile.TiffFile(str(self.path_line_180.text()))
+        self.arr_180 = tif_180.asarray()
+
+        self.arr_flip = np.fliplr(self.arr_0)
+
+    def compute_axis(self):
+        self.width = self.arr_0.shape[1]
+
+        mean = self.arr_0.mean()
+        mean_0 = self.arr_0 - mean
+        mean_180 = self.arr_180 - mean
+        mean_0[mean_0 < 0] = 0
+        mean_180[mean_180 < 0] = 0
+
+        convolved = fftconvolve(mean_0, mean_180[::-1, :], mode='same')
+        center = np.unravel_index(convolved.argmax(), convolved.shape)[1]
+
+        self.axis = (self.width / 2.0 + center) / 2
+        adj = (self.width / 2.0) - self.axis
+        self.move = int(-adj)
+        slider_val = int(adj) + 500
+        self.slider.setValue(slider_val)
+
+        self.update_image()
+
+    def on_move_slider(self):
+        self.pos = self.slider.value()
+        if self.pos > 500:
+            self.move = -1 * (self.pos - 500)
+        elif self.pos < 500:
+            self.move = 500 - self.pos
+        else:
+            self.move = 0
+
+        self.on_update_axis()
+        self.update_image()
+
+    def update_image(self):
+        arr_180 = np.roll(self.arr_180, self.move, axis=1)
+        self.arr_over = self.arr_flip - arr_180
+        self.w_over.setImage(self.arr_over)
+
+    def on_update_axis(self):
+        if self.move > 0:
+            self.axis = self.width / 2 + self.move
+        elif self.move < 0:
+            self.axis = self.width / 2 - self.move
+        else:
+            self.axis = self.width / 2
+
+        self.w_axis.setText('   rotation axis = %i px' % (self.axis))
+
+    def on_remove_extrema(self):
+        max_flip = np.percentile(self.arr_flip, 99)
+        min_flip = np.percentile(self.arr_flip, 1)
+        self.arr_flip[self.arr_flip > max_flip] = max_flip
+        self.arr_flip[self.arr_flip < min_flip] = min_flip
+
+        max_180 = np.percentile(self.arr_180, 99)
+        min_180 = np.percentile(self.arr_180, 1)
+        self.arr_180[self.arr_180 > max_180] = max_180
+        self.arr_180[self.arr_180 < min_180] = min_180
+
+        self.update_image()
+        self.checkbox.setEnabled(False)
+
+    def do_layout(self):
+        self.layout = True
+
+        d_axis = Dock("axis", size = (800, 20)) 
+        d_over = Dock("Overlay: Flip 0 deg / 180 deg", size = (800, 380))
+        d_axis.hideTitleBar()
+        d_over.hideTitleBar()
+
+        self.area.addDock(d_axis, 'bottom', self.d_browse)
+        self.area.addDock(d_over, 'bottom', d_axis)
+
+        self.w_axis.setText('   rotation axis = %i px' % (self.axis))
+        self.checkbox = QtGui.QCheckBox('Remove extrema', self)
+        d_axis.addWidget(self.w_axis, 0, 0)
+        d_axis.addWidget(self.checkbox, 0, 1)
+
+        d_over.addWidget(self.w_over)
+        d_over.addWidget(self.slider)
+
+        self.slider.valueChanged.connect(self.on_move_slider)
+        self.checkbox.clicked.connect(self.on_remove_extrema)
+
+if __name__ == '__main__':
+    app = QtGui.QApplication(sys.argv)
+
+    window = ApplicationWindow(app)
+    window.show()
+
+    sys.exit(app.exec_())
